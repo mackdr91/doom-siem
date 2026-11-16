@@ -61,8 +61,8 @@ docker compose up --build -d
 ```
 
 ### 3. Service Endpoints
-- **Doom SOC Dashboard (Next.js)**: [http://localhost:3000](http://localhost:3000)
+- **Doom SOC Dashboard (Next.js)**: [http://localhost:3002](http://localhost:3002)
 - **Doom Engine API & Health (Go)**: [http://localhost:8080/api/v1/health](http://localhost:8080/api/v1/health)
 - **ClickHouse HTTP Interface**: `http://localhost:8123`
-- **PostgreSQL**: `localhost:5432`
+- **PostgreSQL**: `localhost:5434`
 - **Redis**: `localhost:6379`

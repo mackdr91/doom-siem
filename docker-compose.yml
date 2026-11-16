@@ -1,0 +1,126 @@
+# Author: Domonick Mack
+# Date: 2026-11-16
+# Description: Docker Compose service orchestration for the Doom SIEM local development and testing stack.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: doom-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-doom_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-doom_secret_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-doom_siem}
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - doom_postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-doom_admin} -d ${POSTGRES_DB:-doom_siem}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - doom-net
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: doom-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-doom_ch}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-doom_ch_secret}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-doom_telemetry}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+    volumes:
+      - doom_clickhouse_data:/var/lib/clickhouse
+      - ./infra/clickhouse/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - doom-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: doom-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - doom_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - doom-net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: doom-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DOOM_ENV: ${DOOM_ENV:-development}
+      DOOM_VERSION: ${DOOM_VERSION:-0.1.0-phase1}
+      BACKEND_PORT: ${BACKEND_PORT:-8080}
+      SYSLOG_UDP_PORT: ${SYSLOG_UDP_PORT:-5514}
+      SYSLOG_TCP_PORT: ${SYSLOG_TCP_PORT:-5514}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3002,http://localhost:3000}
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgres://doom_admin:doom_secret_pass@postgres:5432/doom_siem?sslmode=disable}
+      CLICKHOUSE_HTTP_URL: ${CLICKHOUSE_HTTP_URL:-http://clickhouse:8123}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-doom_ch}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-doom_ch_secret}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-doom_telemetry}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+      - "${SYSLOG_UDP_PORT:-5514}:5514/udp"
+      - "${SYSLOG_TCP_PORT:-5514}:5514/tcp"
+    networks:
+      - doom-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    container_name: doom-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-http://backend:8080}
+    ports:
+      - "${FRONTEND_PORT:-3002}:3000"
+    networks:
+      - doom-net
+
+volumes:
+  doom_postgres_data:
+  doom_clickhouse_data:
+  doom_redis_data:
+
+networks:
+  doom-net:
+    driver: bridge

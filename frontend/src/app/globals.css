@@ -1,0 +1,72 @@
+/*
+Author: Domonick Mack
+Date: 2026-11-16
+Description: Global stylesheet for the Doom SOC Dark Ops interface with modern color-scheme and accessibility tokens.
+*/
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --doom-canvas-light: #09090f;
+  --doom-canvas-dark: #060609;
+  --doom-text-light: #f4f4f6;
+  --doom-text-dark: #f4f4f6;
+  --doom-accent-light: #e11d48;
+  --doom-accent-dark: #f43f5e;
+  --doom-scrollbar-track: #0c0c12;
+  --doom-scrollbar-thumb: #6b6b80;
+
+  --doom-canvas: var(--doom-canvas-light);
+  --doom-text: var(--doom-text-light);
+  --doom-accent: var(--doom-accent-light);
+
+  @media (prefers-color-scheme: dark) {
+    --doom-canvas: var(--doom-canvas-dark);
+    --doom-text: var(--doom-text-dark);
+    --doom-accent: var(--doom-accent-dark);
+  }
+
+  @supports (color: light-dark(white, black)) {
+    --doom-canvas: light-dark(var(--doom-canvas-light), var(--doom-canvas-dark));
+    --doom-text: light-dark(var(--doom-text-light), var(--doom-text-dark));
+    --doom-accent: light-dark(var(--doom-accent-light), var(--doom-accent-dark));
+  }
+
+  color-scheme: light dark;
+  accent-color: var(--doom-accent);
+  scrollbar-width: thin;
+  scrollbar-color: var(--doom-scrollbar-thumb) var(--doom-scrollbar-track);
+}
+
+@supports not (scrollbar-color: auto) {
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--doom-scrollbar-thumb);
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--doom-scrollbar-track);
+  }
+}
+
+@media (forced-colors: active) {
+  .doom-card {
+    border: 1px solid CanvasText;
+  }
+
+  .doom-badge-active {
+    outline: 2px solid Highlight;
+  }
+}
+
+body {
+  background-color: var(--doom-canvas);
+  color: var(--doom-text);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}

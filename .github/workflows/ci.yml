@@ -1,0 +1,76 @@
+# Author: Domonick Mack
+# Date: 2026-11-16
+# Description: GitHub Actions CI/CD workflow for automated linting, testing, and build verification of Doom SIEM.
+
+name: Doom SIEM CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  backend-ci:
+    name: Go Engine Vet, Test & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: backend/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run Go Vet
+        run: go vet ./...
+
+      - name: Run Unit Tests with Race Detector
+        run: go test -v -race ./...
+
+      - name: Build Production Binary
+        run: CGO_ENABLED=0 go build -v -o bin/doom-server ./cmd/server
+
+  frontend-ci:
+    name: Next.js SOC Dashboard Typecheck & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run TypeScript Typecheck
+        run: npm run typecheck
+
+      - name: Build Next.js Production Bundle
+        run: mkdir -p public && npm run build
+
+  docker-compose-validate:
+    name: Validate Docker Compose Stack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml syntax
+        run: docker compose config -q
