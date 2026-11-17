@@ -1,7 +1,7 @@
 /*
 Author: Domonick Mack
 Date: 2026-11-16
-Description: HTTP API router, middleware stack, multi-protocol ingestion endpoints, MITRE ATT&CK rule/alert triage handlers, and SSE stream for Doom SIEM.
+Description: HTTP API router, middleware stack, multi-protocol ingestion endpoints, MITRE ATT&CK rule/alert triage handlers, and AI threat analysis endpoints for Doom SIEM.
 */
 
 package api
@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mackdr91/doom-siem/backend/internal/ai"
 	"github.com/mackdr91/doom-siem/backend/internal/config"
 	"github.com/mackdr91/doom-siem/backend/internal/detection"
 	"github.com/mackdr91/doom-siem/backend/internal/health"
@@ -34,10 +35,11 @@ type Server struct {
 	broker          *telemetry.StreamBroker
 	pipeline        *ingest.Pipeline
 	detectionEngine *detection.Engine
+	aiAnalyzer      *ai.Analyzer
 	logger          *slog.Logger
 }
 
-// NewServer constructs a new HTTP API server instance with health, ingestion, telemetry, and MITRE detection dependencies.
+// NewServer constructs a new HTTP API server instance with health, ingestion, telemetry, MITRE detection, and AI analysis dependencies.
 func NewServer(
 	cfg *config.Config,
 	checker *health.Checker,
@@ -45,6 +47,7 @@ func NewServer(
 	broker *telemetry.StreamBroker,
 	pipeline *ingest.Pipeline,
 	detectionEngine *detection.Engine,
+	aiAnalyzer *ai.Analyzer,
 	logger *slog.Logger,
 ) *Server {
 	return &Server{
@@ -54,6 +57,7 @@ func NewServer(
 		broker:          broker,
 		pipeline:        pipeline,
 		detectionEngine: detectionEngine,
+		aiAnalyzer:      aiAnalyzer,
 		logger:          logger,
 	}
 }
@@ -83,6 +87,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/alerts/{id}", s.handleGetAlert)
 	mux.HandleFunc("PATCH /api/v1/alerts/{id}/triage", s.handleUpdateAlertTriage)
 
+	// Phase 4: AI-Assisted Log Analysis & Threat Summarization
+	mux.HandleFunc("POST /api/v1/alerts/{id}/analyze", s.handleAnalyzeAlert)
+	mux.HandleFunc("POST /api/v1/ai/analyze-log", s.handleAnalyzeAdHocLog)
+
 	return s.recoverMiddleware(s.loggingMiddleware(s.corsMiddleware(mux)))
 }
 
@@ -94,7 +102,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleEnvironment(w http.ResponseWriter, _ *http.Request) {
 	payload := map[string]any{
 		"project":     "Doom SIEM",
-		"phase":       "Phase 3: MITRE ATT&CK Detection Engine & Alert Triage Workflow",
+		"phase":       "Phase 4: AI-Assisted Log Analysis & Threat Summarization",
 		"environment": s.cfg.Environment,
 		"version":     s.cfg.Version,
 		"capabilities": []string{
@@ -412,6 +420,63 @@ func (s *Server) handleUpdateAlertTriage(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) handleAnalyzeAlert(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing alert id"})
+		return
+	}
+
+	alert, err := s.detectionEngine.Store().GetAlertByID(r.Context(), id)
+	if errors.Is(err, detection.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "alert not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	report, err := s.aiAnalyzer.AnalyzeAlert(r.Context(), *alert)
+	if err != nil {
+		s.logger.Error("analyze_alert_failed", slog.String("alert_id", id), slog.String("error", err.Error()))
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	updatedAlert, updateErr := s.detectionEngine.Store().UpdateAlertAISummary(r.Context(), id, report.FormattedMarkdown)
+	if updateErr != nil {
+		updatedAlert = alert
+		updatedAlert.AISummary = report.FormattedMarkdown
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"alert":    updatedAlert,
+		"analysis": report,
+	})
+}
+
+func (s *Server) handleAnalyzeAdHocLog(w http.ResponseWriter, r *http.Request) {
+	var req ai.AdHocLogAnalysisRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 128*1024)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload"})
+		return
+	}
+	if strings.TrimSpace(req.LogLine) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "log_line is required"})
+		return
+	}
+
+	report, err := s.aiAnalyzer.AnalyzeAdHocLog(r.Context(), req)
+	if err != nil {
+		s.logger.Error("analyze_adhoc_log_failed", slog.String("error", err.Error()))
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, report)
 }
 
 func decodeIngestPayload(raw []byte) ([]telemetry.SecurityEvent, error) {

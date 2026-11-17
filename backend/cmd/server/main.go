@@ -1,7 +1,7 @@
 /*
 Author: Domonick Mack
 Date: 2026-11-16
-Description: Entrypoint for the Doom SIEM Go backend server with multi-protocol syslog collectors, MITRE ATT&CK detection engine, and graceful shutdown.
+Description: Entrypoint for the Doom SIEM Go backend server with multi-protocol syslog collectors, MITRE ATT&CK detection engine, AI threat analyzer, and graceful shutdown.
 */
 
 package main
@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mackdr91/doom-siem/backend/internal/ai"
 	"github.com/mackdr91/doom-siem/backend/internal/api"
 	"github.com/mackdr91/doom-siem/backend/internal/config"
 	"github.com/mackdr91/doom-siem/backend/internal/detection"
@@ -69,6 +70,8 @@ func main() {
 	_ = detectionEngine.RefreshRules(shutdownCtx)
 	pipeline.SetDetectionEngine(detectionEngine)
 
+	aiAnalyzer := ai.NewAnalyzer(os.Getenv("GEMINI_API_KEY"))
+
 	syslogCollector := ingest.NewSyslogCollector(cfg.SyslogUDPPort, cfg.SyslogTCPPort, pipeline, logger)
 	if err := syslogCollector.Start(shutdownCtx); err != nil {
 		logger.Error("syslog_collector_start_failed", slog.String("error", err.Error()))
@@ -76,7 +79,7 @@ func main() {
 	}
 	defer syslogCollector.Close()
 
-	apiServer := api.NewServer(cfg, checker, repo, broker, pipeline, detectionEngine, logger)
+	apiServer := api.NewServer(cfg, checker, repo, broker, pipeline, detectionEngine, aiAnalyzer, logger)
 
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
