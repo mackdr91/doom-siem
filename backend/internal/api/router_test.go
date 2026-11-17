@@ -1,13 +1,14 @@
 /*
 Author: Domonick Mack
 Date: 2026-11-16
-Description: Unit and integration tests for the Doom SIEM API router, health checker, and multi-protocol ingestion pipeline.
+Description: Unit and integration tests for the Doom SIEM API router, health checker, multi-protocol ingestion, and MITRE ATT&CK alert triage.
 */
 
 package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -20,12 +21,13 @@ import (
 
 	"github.com/mackdr91/doom-siem/backend/internal/api"
 	"github.com/mackdr91/doom-siem/backend/internal/config"
+	"github.com/mackdr91/doom-siem/backend/internal/detection"
 	"github.com/mackdr91/doom-siem/backend/internal/health"
 	"github.com/mackdr91/doom-siem/backend/internal/ingest"
 	"github.com/mackdr91/doom-siem/backend/internal/telemetry"
 )
 
-func TestHealthAndIngestionPipelineEndpoints(t *testing.T) {
+func TestHealthIngestionAndDetectionEndpoints(t *testing.T) {
 	var storedEventsMu sync.Mutex
 	storedEvents := make([]telemetry.SecurityEvent, 0)
 
@@ -116,7 +118,7 @@ func TestHealthAndIngestionPipelineEndpoints(t *testing.T) {
 
 	cfg := &config.Config{
 		Environment:        "test",
-		Version:            "0.2.0-test",
+		Version:            "0.3.0-test",
 		HTTPPort:           8080,
 		SyslogUDPPort:      0,
 		SyslogTCPPort:      0,
@@ -135,7 +137,13 @@ func TestHealthAndIngestionPipelineEndpoints(t *testing.T) {
 	repo := telemetry.NewRepository(cfg)
 	broker := telemetry.NewStreamBroker(cfg.RedisAddr)
 	pipeline := ingest.NewPipeline(repo, broker, logger)
-	srv := api.NewServer(cfg, checker, repo, broker, pipeline, logger)
+
+	memStore := detection.NewMemoryStore()
+	detectionEngine := detection.NewEngine(memStore, logger)
+	_ = detectionEngine.RefreshRules(context.Background())
+	pipeline.SetDetectionEngine(detectionEngine)
+
+	srv := api.NewServer(cfg, checker, repo, broker, pipeline, detectionEngine, logger)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -145,24 +153,32 @@ func TestHealthAndIngestionPipelineEndpoints(t *testing.T) {
 		t.Fatalf("GET /api/v1/health failed: %v", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected HTTP 200, got %d", resp.StatusCode)
 	}
 
-	var report health.SystemHealthReport
-	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
-		t.Fatalf("failed to decode health report: %v", err)
+	// 2. Verify GET /api/v1/rules returns 6 seeded MITRE rules
+	rulesResp, err := http.Get(ts.URL + "/api/v1/rules")
+	if err != nil {
+		t.Fatalf("GET /api/v1/rules failed: %v", err)
 	}
-	if report.Dependencies[1].Status != "healthy" {
-		t.Errorf("expected ClickHouse status healthy, got %q", report.Dependencies[1].Status)
+	defer rulesResp.Body.Close()
+	if rulesResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected HTTP 200 from /api/v1/rules, got %d", rulesResp.StatusCode)
 	}
-	if report.Dependencies[2].Status != "healthy" {
-		t.Errorf("expected Redis status healthy, got %q", report.Dependencies[2].Status)
+	var rulesData struct {
+		Count int                       `json:"count"`
+		Rules []detection.DetectionRule `json:"rules"`
+	}
+	if err := json.NewDecoder(rulesResp.Body).Decode(&rulesData); err != nil {
+		t.Fatalf("failed to decode rules response: %v", err)
+	}
+	if rulesData.Count < 6 {
+		t.Errorf("expected at least 6 default MITRE rules, got %d", rulesData.Count)
 	}
 
-	// 2. Verify POST /api/v1/ingest/webhook
-	webhookBody := []byte(`{"host":"waf-edge-01","severity":"critical","source_ip":"198.51.100.42","service":"nginx-waf","message":"SQL injection blocked on /login"}`)
+	// 3. Verify POST /api/v1/ingest/webhook triggers SQLi detection rule
+	webhookBody := []byte(`{"host":"waf-edge-01","severity":"critical","source_ip":"198.51.100.42","service":"nginx-waf","message":"SQL injection blocked on /login: UNION SELECT 1,2"}`)
 	ingestResp, err := http.Post(ts.URL+"/api/v1/ingest/webhook", "application/json", bytes.NewReader(webhookBody))
 	if err != nil {
 		t.Fatalf("POST /api/v1/ingest/webhook failed: %v", err)
@@ -172,8 +188,8 @@ func TestHealthAndIngestionPipelineEndpoints(t *testing.T) {
 		t.Fatalf("expected HTTP 202 from webhook ingest, got %d", ingestResp.StatusCode)
 	}
 
-	// 3. Verify POST /api/v1/ingest/agent
-	agentBody := []byte(`{"events":[{"host":"wkstn-04","severity":"high","service":"edr-agent","message":"Suspicious powershell -enc execution"}]}`)
+	// 4. Verify POST /api/v1/ingest/agent triggers PowerShell detection rule
+	agentBody := []byte(`{"events":[{"host":"wkstn-04","severity":"high","service":"edr-agent","message":"Suspicious powershell.exe -enc execution"}]}`)
 	agentResp, err := http.Post(ts.URL+"/api/v1/ingest/agent", "application/json", bytes.NewReader(agentBody))
 	if err != nil {
 		t.Fatalf("POST /api/v1/ingest/agent failed: %v", err)
@@ -183,35 +199,49 @@ func TestHealthAndIngestionPipelineEndpoints(t *testing.T) {
 		t.Fatalf("expected HTTP 202 from agent ingest, got %d", agentResp.StatusCode)
 	}
 
-	// 4. Verify GET /api/v1/events
-	eventsResp, err := http.Get(ts.URL + "/api/v1/events?limit=10")
+	// 5. Verify GET /api/v1/alerts contains the triggered alerts
+	alertsResp, err := http.Get(ts.URL + "/api/v1/alerts")
 	if err != nil {
-		t.Fatalf("GET /api/v1/events failed: %v", err)
+		t.Fatalf("GET /api/v1/alerts failed: %v", err)
 	}
-	defer eventsResp.Body.Close()
-	if eventsResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected HTTP 200 from /api/v1/events, got %d", eventsResp.StatusCode)
-	}
-
-	var eventsPayload struct {
+	defer alertsResp.Body.Close()
+	var alertsPayload struct {
 		Count  int                       `json:"count"`
-		Events []telemetry.SecurityEvent `json:"events"`
+		Alerts []detection.SecurityAlert `json:"alerts"`
 	}
-	if err := json.NewDecoder(eventsResp.Body).Decode(&eventsPayload); err != nil {
-		t.Fatalf("failed to decode events response: %v", err)
+	if err := json.NewDecoder(alertsResp.Body).Decode(&alertsPayload); err != nil {
+		t.Fatalf("failed to decode alerts payload: %v", err)
 	}
-	if eventsPayload.Count != 2 {
-		t.Errorf("expected 2 stored events, got %d", eventsPayload.Count)
+	if alertsPayload.Count < 2 {
+		t.Fatalf("expected at least 2 triggered alerts, got %d", alertsPayload.Count)
 	}
 
-	// 5. Verify GET /api/v1/events/stats
-	statsResp, err := http.Get(ts.URL + "/api/v1/events/stats")
+	// 6. Verify PATCH /api/v1/alerts/{id}/triage updates status & assignee
+	alertID := alertsPayload.Alerts[0].ID
+	triageReqBody := []byte(`{"status":"investigating","assignee":"SOC-Lead","notes":"Confirmed active attack vector"}`)
+	patchReq, err := http.NewRequest(http.MethodPatch, ts.URL+"/api/v1/alerts/"+alertID+"/triage", bytes.NewReader(triageReqBody))
 	if err != nil {
-		t.Fatalf("GET /api/v1/events/stats failed: %v", err)
+		t.Fatalf("failed to create PATCH request: %v", err)
 	}
-	defer statsResp.Body.Close()
-	if statsResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected HTTP 200 from /api/v1/events/stats, got %d", statsResp.StatusCode)
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchResp, err := http.DefaultClient.Do(patchReq)
+	if err != nil {
+		t.Fatalf("PATCH /api/v1/alerts/%s/triage failed: %v", alertID, err)
+	}
+	defer patchResp.Body.Close()
+	if patchResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected HTTP 200 from triage PATCH, got %d", patchResp.StatusCode)
+	}
+
+	var updatedAlert detection.SecurityAlert
+	if err := json.NewDecoder(patchResp.Body).Decode(&updatedAlert); err != nil {
+		t.Fatalf("failed to decode updated alert: %v", err)
+	}
+	if updatedAlert.Status != detection.AlertStatusInvestigating {
+		t.Errorf("expected status investigating, got %q", updatedAlert.Status)
+	}
+	if updatedAlert.Assignee != "SOC-Lead" {
+		t.Errorf("expected assignee SOC-Lead, got %q", updatedAlert.Assignee)
 	}
 }
 

@@ -1,7 +1,7 @@
 /*
 Author: Domonick Mack
 Date: 2026-11-16
-Description: Entrypoint for the Doom SIEM Go backend server with multi-protocol syslog collectors and graceful shutdown.
+Description: Entrypoint for the Doom SIEM Go backend server with multi-protocol syslog collectors, MITRE ATT&CK detection engine, and graceful shutdown.
 */
 
 package main
@@ -19,6 +19,7 @@ import (
 
 	"github.com/mackdr91/doom-siem/backend/internal/api"
 	"github.com/mackdr91/doom-siem/backend/internal/config"
+	"github.com/mackdr91/doom-siem/backend/internal/detection"
 	"github.com/mackdr91/doom-siem/backend/internal/health"
 	"github.com/mackdr91/doom-siem/backend/internal/ingest"
 	"github.com/mackdr91/doom-siem/backend/internal/telemetry"
@@ -43,6 +44,31 @@ func main() {
 	broker := telemetry.NewStreamBroker(cfg.RedisAddr)
 	pipeline := ingest.NewPipeline(repo, broker, logger)
 
+	var detectionStore detection.Store
+	pgStore, pgErr := detection.NewPostgresStore(cfg.PostgresDSN)
+	if pgErr != nil {
+		logger.Warn("postgres_store_open_failed_using_memory_fallback", slog.String("error", pgErr.Error()))
+		detectionStore = detection.NewMemoryStore()
+	} else {
+		bootCtx, bootCancel := context.WithTimeout(shutdownCtx, 10*time.Second)
+		if bootErr := pgStore.Bootstrap(bootCtx); bootErr != nil {
+			logger.Warn("postgres_store_bootstrap_failed_using_memory_fallback", slog.String("error", bootErr.Error()))
+			_ = pgStore.Close()
+			detectionStore = detection.NewMemoryStore()
+		} else {
+			detectionStore = pgStore
+			logger.Info("postgres_detection_store_bootstrapped")
+		}
+		bootCancel()
+	}
+	defer func() {
+		_ = detectionStore.Close()
+	}()
+
+	detectionEngine := detection.NewEngine(detectionStore, logger)
+	_ = detectionEngine.RefreshRules(shutdownCtx)
+	pipeline.SetDetectionEngine(detectionEngine)
+
 	syslogCollector := ingest.NewSyslogCollector(cfg.SyslogUDPPort, cfg.SyslogTCPPort, pipeline, logger)
 	if err := syslogCollector.Start(shutdownCtx); err != nil {
 		logger.Error("syslog_collector_start_failed", slog.String("error", err.Error()))
@@ -50,7 +76,7 @@ func main() {
 	}
 	defer syslogCollector.Close()
 
-	apiServer := api.NewServer(cfg, checker, repo, broker, pipeline, logger)
+	apiServer := api.NewServer(cfg, checker, repo, broker, pipeline, detectionEngine, logger)
 
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),

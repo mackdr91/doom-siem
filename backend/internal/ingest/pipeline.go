@@ -1,7 +1,7 @@
 /*
 Author: Domonick Mack
 Date: 2026-11-16
-Description: Multi-protocol ingestion pipeline coordinator for ClickHouse persistence, Redis Streams buffering, and attack simulation.
+Description: Multi-protocol ingestion pipeline coordinator for ClickHouse persistence, Redis Streams buffering, MITRE rule evaluation, and attack simulation.
 */
 
 package ingest
@@ -14,17 +14,19 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/mackdr91/doom-siem/backend/internal/detection"
 	"github.com/mackdr91/doom-siem/backend/internal/telemetry"
 )
 
-// Pipeline coordinates event normalization, ClickHouse batch writes, and Redis Stream publication.
+// Pipeline coordinates event normalization, ClickHouse batch writes, Redis Stream publication, and MITRE ATT&CK rule evaluation.
 type Pipeline struct {
-	repo         *telemetry.Repository
-	broker       *telemetry.StreamBroker
-	logger       *slog.Logger
-	acceptedCnt  atomic.Uint64
-	failedCnt    atomic.Uint64
-	asyncQueue   chan telemetry.SecurityEvent
+	repo            *telemetry.Repository
+	broker          *telemetry.StreamBroker
+	detectionEngine *detection.Engine
+	logger          *slog.Logger
+	acceptedCnt     atomic.Uint64
+	failedCnt       atomic.Uint64
+	asyncQueue      chan telemetry.SecurityEvent
 }
 
 // NewPipeline initializes the ingestion Pipeline and starts background workers for Syslog datagrams.
@@ -39,6 +41,11 @@ func NewPipeline(repo *telemetry.Repository, broker *telemetry.StreamBroker, log
 	return p
 }
 
+// SetDetectionEngine attaches the MITRE ATT&CK detection engine to evaluate every ingested batch.
+func (p *Pipeline) SetDetectionEngine(engine *detection.Engine) {
+	p.detectionEngine = engine
+}
+
 // EnqueueAsync queues a parsed syslog event for non-blocking background persistence and streaming.
 func (p *Pipeline) EnqueueAsync(ev telemetry.SecurityEvent) {
 	select {
@@ -49,7 +56,7 @@ func (p *Pipeline) EnqueueAsync(ev telemetry.SecurityEvent) {
 	}
 }
 
-// IngestBatch normalizes a batch of events, persists them to ClickHouse, and publishes them to Redis Streams and SSE.
+// IngestBatch normalizes a batch of events, persists them to ClickHouse, publishes them to Redis Streams/SSE, and evaluates MITRE rules.
 func (p *Pipeline) IngestBatch(ctx context.Context, rawEvents []telemetry.SecurityEvent, defaultProtocol string) ([]telemetry.SecurityEvent, error) {
 	if len(rawEvents) == 0 {
 		return nil, nil
@@ -67,6 +74,12 @@ func (p *Pipeline) IngestBatch(ctx context.Context, rawEvents []telemetry.Securi
 
 	if err := p.broker.Publish(ctx, normalized); err != nil {
 		p.logger.Warn("redis_stream_publish_warning", slog.String("error", err.Error()))
+	}
+
+	if p.detectionEngine != nil {
+		if _, err := p.detectionEngine.EvaluateBatch(ctx, normalized); err != nil {
+			p.logger.Warn("detection_engine_evaluation_warning", slog.String("error", err.Error()))
+		}
 	}
 
 	p.acceptedCnt.Add(uint64(len(normalized)))
@@ -93,7 +106,7 @@ func (p *Pipeline) SimulateTraffic(ctx context.Context, udpPort int, tcpPort int
 		}
 	}
 
-	// 3. Ingest direct HTTP Webhook & Endpoint Agent Shipper events (plus deterministic records if loopback sockets are still flushing)
+	// 3. Ingest direct HTTP Webhook & Endpoint Agent Shipper events
 	batch := []telemetry.SecurityEvent{
 		{
 			SourceProtocol: telemetry.ProtocolHTTPWebhook,

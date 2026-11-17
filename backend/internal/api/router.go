@@ -1,7 +1,7 @@
 /*
 Author: Domonick Mack
 Date: 2026-11-16
-Description: HTTP API router, middleware stack, multi-protocol ingestion endpoints, ClickHouse query handlers, and SSE stream for Doom SIEM.
+Description: HTTP API router, middleware stack, multi-protocol ingestion endpoints, MITRE ATT&CK rule/alert triage handlers, and SSE stream for Doom SIEM.
 */
 
 package api
@@ -9,6 +9,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/mackdr91/doom-siem/backend/internal/config"
+	"github.com/mackdr91/doom-siem/backend/internal/detection"
 	"github.com/mackdr91/doom-siem/backend/internal/health"
 	"github.com/mackdr91/doom-siem/backend/internal/ingest"
 	"github.com/mackdr91/doom-siem/backend/internal/telemetry"
@@ -26,30 +28,33 @@ import (
 
 // Server encapsulates the HTTP API handlers and dependencies for Doom SIEM.
 type Server struct {
-	cfg      *config.Config
-	checker  *health.Checker
-	repo     *telemetry.Repository
-	broker   *telemetry.StreamBroker
-	pipeline *ingest.Pipeline
-	logger   *slog.Logger
+	cfg             *config.Config
+	checker         *health.Checker
+	repo            *telemetry.Repository
+	broker          *telemetry.StreamBroker
+	pipeline        *ingest.Pipeline
+	detectionEngine *detection.Engine
+	logger          *slog.Logger
 }
 
-// NewServer constructs a new HTTP API server instance with health, ingestion, and telemetry dependencies.
+// NewServer constructs a new HTTP API server instance with health, ingestion, telemetry, and MITRE detection dependencies.
 func NewServer(
 	cfg *config.Config,
 	checker *health.Checker,
 	repo *telemetry.Repository,
 	broker *telemetry.StreamBroker,
 	pipeline *ingest.Pipeline,
+	detectionEngine *detection.Engine,
 	logger *slog.Logger,
 ) *Server {
 	return &Server{
-		cfg:      cfg,
-		checker:  checker,
-		repo:     repo,
-		broker:   broker,
-		pipeline: pipeline,
-		logger:   logger,
+		cfg:             cfg,
+		checker:         checker,
+		repo:            repo,
+		broker:          broker,
+		pipeline:        pipeline,
+		detectionEngine: detectionEngine,
+		logger:          logger,
 	}
 }
 
@@ -69,6 +74,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/events/stats", s.handleTelemetryStats)
 	mux.HandleFunc("GET /api/v1/events/stream", s.handleEventStreamSSE)
 
+	// Phase 3: MITRE ATT&CK Detection Engine & Alert Triage Workflow
+	mux.HandleFunc("GET /api/v1/rules", s.handleListRules)
+	mux.HandleFunc("POST /api/v1/rules", s.handleCreateRule)
+	mux.HandleFunc("PATCH /api/v1/rules/{id}", s.handleToggleRule)
+	mux.HandleFunc("GET /api/v1/alerts", s.handleListAlerts)
+	mux.HandleFunc("GET /api/v1/alerts/stats", s.handleAlertStats)
+	mux.HandleFunc("GET /api/v1/alerts/{id}", s.handleGetAlert)
+	mux.HandleFunc("PATCH /api/v1/alerts/{id}/triage", s.handleUpdateAlertTriage)
+
 	return s.recoverMiddleware(s.loggingMiddleware(s.corsMiddleware(mux)))
 }
 
@@ -80,7 +94,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleEnvironment(w http.ResponseWriter, _ *http.Request) {
 	payload := map[string]any{
 		"project":     "Doom SIEM",
-		"phase":       "Phase 2: Multi-Protocol Log Ingestion & Telemetry Pipeline",
+		"phase":       "Phase 3: MITRE ATT&CK Detection Engine & Alert Triage Workflow",
 		"environment": s.cfg.Environment,
 		"version":     s.cfg.Version,
 		"capabilities": []string{
@@ -149,7 +163,7 @@ func (s *Server) handleSimulateTraffic(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":  "simulated",
-		"message": "Dispatched UDP/TCP Syslog frames (:5514) and ingested HTTP Webhook + Agent Shipper batches",
+		"message": "Dispatched UDP/TCP Syslog frames (:5514), ingested HTTP/Agent batches, and evaluated MITRE ATT&CK rules",
 		"count":   len(ingested),
 		"events":  ingested,
 	})
@@ -248,13 +262,164 @@ func (s *Server) handleEventStreamSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleListRules(w http.ResponseWriter, r *http.Request) {
+	rules, err := s.detectionEngine.Store().ListRules(r.Context())
+	if err != nil {
+		s.logger.Error("list_rules_failed", slog.String("error", err.Error()))
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": len(rules),
+		"rules": rules,
+	})
+}
+
+func (s *Server) handleCreateRule(w http.ResponseWriter, r *http.Request) {
+	var req detection.CreateRuleRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload"})
+		return
+	}
+	if strings.TrimSpace(req.RuleCode) == "" || strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.MitreTactic) == "" || strings.TrimSpace(req.MitreTechniqueID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "rule_code, title, mitre_tactic, and mitre_technique_id are required",
+		})
+		return
+	}
+
+	created, err := s.detectionEngine.Store().CreateRule(r.Context(), req)
+	if err != nil {
+		s.logger.Error("create_rule_failed", slog.String("error", err.Error()))
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	_ = s.detectionEngine.RefreshRules(r.Context())
+
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) handleToggleRule(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing rule id"})
+		return
+	}
+
+	var req detection.ToggleRuleRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload"})
+		return
+	}
+
+	updated, err := s.detectionEngine.Store().ToggleRule(r.Context(), id, req.Enabled)
+	if errors.Is(err, detection.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "detection rule not found"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("toggle_rule_failed", slog.String("error", err.Error()))
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	_ = s.detectionEngine.RefreshRules(r.Context())
+
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 100
+	if rawLimit := strings.TrimSpace(q.Get("limit")); rawLimit != "" {
+		if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	filter := detection.AlertQueryFilter{
+		Status:      q.Get("status"),
+		Severity:    q.Get("severity"),
+		MitreTactic: q.Get("tactic"),
+		Search:      q.Get("search"),
+		Limit:       limit,
+	}
+
+	alerts, err := s.detectionEngine.Store().ListAlerts(r.Context(), filter)
+	if err != nil {
+		s.logger.Error("list_alerts_failed", slog.String("error", err.Error()))
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":  len(alerts),
+		"alerts": alerts,
+	})
+}
+
+func (s *Server) handleAlertStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.detectionEngine.Store().GetAlertStats(r.Context())
+	if err != nil {
+		s.logger.Error("alert_stats_failed", slog.String("error", err.Error()))
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) handleGetAlert(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing alert id"})
+		return
+	}
+
+	alert, err := s.detectionEngine.Store().GetAlertByID(r.Context(), id)
+	if errors.Is(err, detection.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "alert not found"})
+		return
+	}
+	if err != nil {
+		s.logger.Error("get_alert_failed", slog.String("error", err.Error()))
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, alert)
+}
+
+func (s *Server) handleUpdateAlertTriage(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing alert id"})
+		return
+	}
+
+	var req detection.AlertTriageUpdateRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload"})
+		return
+	}
+
+	updated, err := s.detectionEngine.Store().UpdateAlertTriage(r.Context(), id, req)
+	if errors.Is(err, detection.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "alert not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, updated)
+}
+
 func decodeIngestPayload(raw []byte) ([]telemetry.SecurityEvent, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return nil, fmt.Errorf("empty request payload")
 	}
 
-	// Support JSON array of events: [...]
 	if trimmed[0] == '[' {
 		var list []telemetry.SecurityEvent
 		if err := json.Unmarshal(trimmed, &list); err != nil {
@@ -266,7 +431,6 @@ func decodeIngestPayload(raw []byte) ([]telemetry.SecurityEvent, error) {
 		return list, nil
 	}
 
-	// Support {"events": [...]} batch object or a single SecurityEvent JSON object
 	var batch telemetry.IngestBatchRequest
 	if err := json.Unmarshal(trimmed, &batch); err == nil && len(batch.Events) > 0 {
 		return batch.Events, nil

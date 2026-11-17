@@ -19,9 +19,12 @@ CREATE TABLE IF NOT EXISTS detection_rules (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     rule_code VARCHAR(64) NOT NULL UNIQUE,
     title VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     severity VARCHAR(24) NOT NULL CHECK (severity IN ('low', 'medium', 'high', 'critical')),
     mitre_tactic VARCHAR(128) NOT NULL,
     mitre_technique_id VARCHAR(32) NOT NULL,
+    match_keywords TEXT NOT NULL DEFAULT '',
+    source_protocol_filter VARCHAR(32) NOT NULL DEFAULT '',
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -30,13 +33,24 @@ CREATE TABLE IF NOT EXISTS detection_rules (
 CREATE TABLE IF NOT EXISTS security_alerts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     rule_id UUID REFERENCES detection_rules(id) ON DELETE SET NULL,
+    rule_code VARCHAR(64) NOT NULL DEFAULT '',
     title VARCHAR(255) NOT NULL,
     severity VARCHAR(24) NOT NULL CHECK (severity IN ('low', 'medium', 'high', 'critical')),
     status VARCHAR(32) NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'investigating', 'resolved', 'false_positive')),
-    source_ip VARCHAR(64),
-    target_host VARCHAR(128),
+    mitre_tactic VARCHAR(128) NOT NULL DEFAULT '',
+    mitre_technique_id VARCHAR(32) NOT NULL DEFAULT '',
+    event_id VARCHAR(64) NOT NULL DEFAULT '',
+    source_protocol VARCHAR(32) NOT NULL DEFAULT '',
+    source_ip VARCHAR(64) NOT NULL DEFAULT '',
+    target_host VARCHAR(128) NOT NULL DEFAULT '',
+    service VARCHAR(64) NOT NULL DEFAULT '',
+    matched_excerpt TEXT NOT NULL DEFAULT '',
+    raw_event_json TEXT NOT NULL DEFAULT '',
     ai_summary TEXT,
-    triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    assignee VARCHAR(128) NOT NULL DEFAULT 'SOC-Queue',
+    notes TEXT NOT NULL DEFAULT '',
+    triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Seed baseline ingestion collectors for environment verification
