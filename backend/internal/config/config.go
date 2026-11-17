@@ -60,7 +60,7 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Environment:        getEnvString("DOOM_ENV", "development"),
-		Version:            getEnvString("DOOM_VERSION", "0.4.0-phase4"),
+		Version:            getEnvString("DOOM_VERSION", "1.0.0-release"),
 		HTTPPort:           httpPort,
 		SyslogUDPPort:      syslogUDPPort,
 		SyslogTCPPort:      syslogTCPPort,

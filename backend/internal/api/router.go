@@ -102,7 +102,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleEnvironment(w http.ResponseWriter, _ *http.Request) {
 	payload := map[string]any{
 		"project":     "Doom SIEM",
-		"phase":       "Phase 4: AI-Assisted Log Analysis & Threat Summarization",
+		"phase":       "Phase 5: Full Doom SOC Dark Ops Release",
 		"environment": s.cfg.Environment,
 		"version":     s.cfg.Version,
 		"capabilities": []string{

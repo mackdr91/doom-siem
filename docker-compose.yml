@@ -79,7 +79,7 @@ services:
         condition: service_healthy
     environment:
       DOOM_ENV: ${DOOM_ENV:-development}
-      DOOM_VERSION: ${DOOM_VERSION:-0.4.0-phase4}
+      DOOM_VERSION: ${DOOM_VERSION:-1.0.0-release}
       BACKEND_PORT: ${BACKEND_PORT:-8080}
       SYSLOG_UDP_PORT: ${SYSLOG_UDP_PORT:-5514}
       SYSLOG_TCP_PORT: ${SYSLOG_TCP_PORT:-5514}

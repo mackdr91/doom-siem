@@ -1,0 +1,9 @@
+# Author: Domonick Mack
+# Date: 2026-11-16
+# Description: Docker build context ignore rules for the Doom SIEM Go backend engine.
+
+bin
+dist
+coverage.out
+*.test
+.DS_Store
