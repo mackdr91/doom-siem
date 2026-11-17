@@ -91,6 +91,7 @@ services:
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-doom_telemetry}
       REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      NVD_API_KEY: ${NVD_API_KEY:-}
     ports:
       - "${BACKEND_PORT:-8080}:8080"
       - "${SYSLOG_UDP_PORT:-5514}:5514/udp"

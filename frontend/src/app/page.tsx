@@ -13,6 +13,7 @@ import {
   CheckCircle2,
   HardDrive,
   LayoutDashboard,
+  PackageSearch,
   Radio,
   RefreshCw,
   ShieldAlert,
@@ -24,6 +25,7 @@ import {
 import CommandCenterView from "@/components/CommandCenterView";
 import LiveLogExplorerView from "@/components/LiveLogExplorerView";
 import AlertsTriageView from "@/components/AlertsTriageView";
+import CpeLookupView from "@/components/CpeLookupView";
 import type {
   ActiveSocModule,
   AlertSummaryStats,
@@ -314,6 +316,20 @@ export default function DoomSocDashboardPage() {
                 {alertStats?.open_alerts ?? 0} OPEN)
               </span>
             </button>
+
+            <button
+              type="button"
+              aria-current={activeModule === "cpe-intel" ? "page" : undefined}
+              onClick={() => setActiveModule("cpe-intel")}
+              className={`inline-flex items-center gap-2 px-4 py-2 rounded font-mono text-xs font-bold tracking-wider transition ${
+                activeModule === "cpe-intel"
+                  ? "bg-doom-crimson text-white"
+                  : "text-zinc-400 hover:text-white hover:bg-doom-panel"
+              }`}
+            >
+              <PackageSearch className="h-4 w-4" aria-hidden="true" />
+              <span>04 // CPE ASSET INTEL</span>
+            </button>
           </div>
         </nav>
       </header>
@@ -331,6 +347,8 @@ export default function DoomSocDashboardPage() {
             "DOOM SOC // CLICKHOUSE LIVE LOG STREAM & PACKET QUERY EXPLORER"}
           {activeModule === "alerts-triage" &&
             "DOOM SOC // MITRE ATT&CK INCIDENT TRIAGE & AI THREAT ANALYST"}
+          {activeModule === "cpe-intel" &&
+            "DOOM SOC // NIST NVD CPE 2.3 ASSET & PLATFORM INTELLIGENCE"}
         </h1>
 
         {errorMessage && (
@@ -381,6 +399,10 @@ export default function DoomSocDashboardPage() {
             initialSelectedAlert={selectedAlertForTriage}
             onRefreshGlobalStats={() => void fetchSocSnapshot()}
           />
+        )}
+
+        {activeModule === "cpe-intel" && (
+          <CpeLookupView apiBaseUrl={API_BASE_URL} />
         )}
       </main>
 

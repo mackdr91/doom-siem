@@ -4,7 +4,11 @@ Date: 2026-11-16
 Description: TypeScript domain interfaces for Doom SIEM telemetry, alerts, MITRE ATT&CK rules, and AI threat analysis.
 */
 
-export type ActiveSocModule = "command-center" | "live-logs" | "alerts-triage";
+export type ActiveSocModule =
+  | "command-center"
+  | "live-logs"
+  | "alerts-triage"
+  | "cpe-intel";
 
 export interface DependencyStatus {
   name: string;
@@ -125,4 +129,32 @@ export interface ThreatAnalysisReport {
   remediation_playbook: string[];
   formatted_markdown: string;
   generated_at_utc: string;
+}
+
+export interface CPEReference {
+  ref: string;
+  type?: string;
+}
+
+export interface CPERecord {
+  cpe_name: string;
+  cpe_name_id: string;
+  title: string;
+  vendor: string;
+  product: string;
+  version: string;
+  deprecated: boolean;
+  created: string;
+  last_modified: string;
+  refs?: CPEReference[];
+}
+
+export interface CPESearchResponse {
+  query: string;
+  total_results: number;
+  results_per_page: number;
+  source: string;
+  cached: boolean;
+  fetched_at_utc: string;
+  cpes: CPERecord[];
 }

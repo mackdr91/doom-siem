@@ -24,6 +24,7 @@ import (
 	"github.com/mackdr91/doom-siem/backend/internal/detection"
 	"github.com/mackdr91/doom-siem/backend/internal/health"
 	"github.com/mackdr91/doom-siem/backend/internal/ingest"
+	"github.com/mackdr91/doom-siem/backend/internal/intel"
 	"github.com/mackdr91/doom-siem/backend/internal/telemetry"
 )
 
@@ -36,10 +37,11 @@ type Server struct {
 	pipeline        *ingest.Pipeline
 	detectionEngine *detection.Engine
 	aiAnalyzer      *ai.Analyzer
+	cpeClient       *intel.CPEClient
 	logger          *slog.Logger
 }
 
-// NewServer constructs a new HTTP API server instance with health, ingestion, telemetry, MITRE detection, and AI analysis dependencies.
+// NewServer constructs a new HTTP API server instance with health, ingestion, telemetry, MITRE detection, AI analysis, and NVD CPE intelligence dependencies.
 func NewServer(
 	cfg *config.Config,
 	checker *health.Checker,
@@ -48,6 +50,7 @@ func NewServer(
 	pipeline *ingest.Pipeline,
 	detectionEngine *detection.Engine,
 	aiAnalyzer *ai.Analyzer,
+	cpeClient *intel.CPEClient,
 	logger *slog.Logger,
 ) *Server {
 	return &Server{
@@ -58,6 +61,7 @@ func NewServer(
 		pipeline:        pipeline,
 		detectionEngine: detectionEngine,
 		aiAnalyzer:      aiAnalyzer,
+		cpeClient:       cpeClient,
 		logger:          logger,
 	}
 }
@@ -90,6 +94,9 @@ func (s *Server) Handler() http.Handler {
 	// Phase 4: AI-Assisted Log Analysis & Threat Summarization
 	mux.HandleFunc("POST /api/v1/alerts/{id}/analyze", s.handleAnalyzeAlert)
 	mux.HandleFunc("POST /api/v1/ai/analyze-log", s.handleAnalyzeAdHocLog)
+
+	// Phase 6: Threat & Asset Intelligence (NIST NVD CPE Lookup)
+	mux.HandleFunc("GET /api/v1/intel/cpes", s.handleSearchCPEs)
 
 	return s.recoverMiddleware(s.loggingMiddleware(s.corsMiddleware(mux)))
 }
@@ -477,6 +484,50 @@ func (s *Server) handleAnalyzeAdHocLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleSearchCPEs(w http.ResponseWriter, r *http.Request) {
+	if s.cpeClient == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "CPE intelligence client is not initialized",
+		})
+		return
+	}
+
+	q := r.URL.Query()
+	keyword := strings.TrimSpace(q.Get("keyword"))
+	cpeMatch := strings.TrimSpace(q.Get("cpe_match"))
+	if keyword == "" && cpeMatch == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "either 'keyword' or 'cpe_match' query parameter is required",
+		})
+		return
+	}
+
+	limit := 20
+	if rawLimit := strings.TrimSpace(q.Get("limit")); rawLimit != "" {
+		if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	includeDeprecated := strings.EqualFold(strings.TrimSpace(q.Get("include_deprecated")), "true")
+
+	result, err := s.cpeClient.SearchCPEs(r.Context(), intel.CPESearchOptions{
+		Keyword:           keyword,
+		CPEMatchString:    cpeMatch,
+		Limit:             limit,
+		IncludeDeprecated: includeDeprecated,
+	})
+	if err != nil {
+		s.logger.Error("cpe_lookup_failed", slog.String("error", err.Error()))
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 func decodeIngestPayload(raw []byte) ([]telemetry.SecurityEvent, error) {

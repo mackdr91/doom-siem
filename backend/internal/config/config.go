@@ -28,6 +28,7 @@ type Config struct {
 	RedisAddr          string
 	CORSAllowedOrigins []string
 	AIEnabled          bool
+	NVDAPIKey          string
 }
 
 // Load reads environment variables and returns a validated Config struct.
@@ -72,6 +73,7 @@ func Load() (*Config, error) {
 		RedisAddr:          getEnvString("REDIS_ADDR", "localhost:6379"),
 		CORSAllowedOrigins: origins,
 		AIEnabled:          geminiKey != "",
+		NVDAPIKey:          strings.TrimSpace(os.Getenv("NVD_API_KEY")),
 	}
 
 	return cfg, nil

@@ -23,6 +23,7 @@ import (
 	"github.com/mackdr91/doom-siem/backend/internal/detection"
 	"github.com/mackdr91/doom-siem/backend/internal/health"
 	"github.com/mackdr91/doom-siem/backend/internal/ingest"
+	"github.com/mackdr91/doom-siem/backend/internal/intel"
 	"github.com/mackdr91/doom-siem/backend/internal/telemetry"
 )
 
@@ -71,6 +72,7 @@ func main() {
 	pipeline.SetDetectionEngine(detectionEngine)
 
 	aiAnalyzer := ai.NewAnalyzer(os.Getenv("GEMINI_API_KEY"))
+	cpeClient := intel.NewCPEClient(cfg.NVDAPIKey)
 
 	syslogCollector := ingest.NewSyslogCollector(cfg.SyslogUDPPort, cfg.SyslogTCPPort, pipeline, logger)
 	if err := syslogCollector.Start(shutdownCtx); err != nil {
@@ -79,7 +81,7 @@ func main() {
 	}
 	defer syslogCollector.Close()
 
-	apiServer := api.NewServer(cfg, checker, repo, broker, pipeline, detectionEngine, aiAnalyzer, logger)
+	apiServer := api.NewServer(cfg, checker, repo, broker, pipeline, detectionEngine, aiAnalyzer, cpeClient, logger)
 
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),

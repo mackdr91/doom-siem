@@ -25,6 +25,7 @@ import (
 	"github.com/mackdr91/doom-siem/backend/internal/detection"
 	"github.com/mackdr91/doom-siem/backend/internal/health"
 	"github.com/mackdr91/doom-siem/backend/internal/ingest"
+	"github.com/mackdr91/doom-siem/backend/internal/intel"
 	"github.com/mackdr91/doom-siem/backend/internal/telemetry"
 )
 
@@ -146,7 +147,16 @@ func TestHealthIngestionDetectionAndAIEndpoints(t *testing.T) {
 
 	aiAnalyzer := ai.NewAnalyzer("")
 
-	srv := api.NewServer(cfg, checker, repo, broker, pipeline, detectionEngine, aiAnalyzer, logger)
+	mockNVD := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"resultsPerPage":1,"startIndex":0,"totalResults":1,"products":[{"cpe":{"deprecated":false,"cpeName":"cpe:2.3:a:f5:nginx:1.27.2:*:*:*:*:*:*:*","cpeNameId":"cpe-id-1","titles":[{"title":"F5 NGINX 1.27.2","lang":"en"}]}}]}`))
+	}))
+	defer mockNVD.Close()
+	cpeClient := intel.NewCPEClient("")
+	cpeClient.SetBaseURL(mockNVD.URL)
+
+	srv := api.NewServer(cfg, checker, repo, broker, pipeline, detectionEngine, aiAnalyzer, cpeClient, logger)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -212,6 +222,23 @@ func TestHealthIngestionDetectionAndAIEndpoints(t *testing.T) {
 	defer adhocResp.Body.Close()
 	if adhocResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected HTTP 200 from adhoc log analysis, got %d", adhocResp.StatusCode)
+	}
+
+	// 5. Verify GET /api/v1/intel/cpes
+	cpeResp, err := http.Get(ts.URL + "/api/v1/intel/cpes?keyword=nginx&limit=5")
+	if err != nil {
+		t.Fatalf("GET /api/v1/intel/cpes failed: %v", err)
+	}
+	defer cpeResp.Body.Close()
+	if cpeResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected HTTP 200 from CPE lookup, got %d", cpeResp.StatusCode)
+	}
+	var cpePayload intel.CPESearchResponse
+	if err := json.NewDecoder(cpeResp.Body).Decode(&cpePayload); err != nil {
+		t.Fatalf("failed to decode CPE response: %v", err)
+	}
+	if len(cpePayload.CPEs) != 1 || cpePayload.CPEs[0].Product != "nginx" {
+		t.Errorf("unexpected CPE lookup response: %+v", cpePayload)
 	}
 }
 
